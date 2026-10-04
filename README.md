@@ -1,10 +1,29 @@
 # maktabdl
 
-`maktabdl` is an asynchronous command-line downloader for Maktabkhooneh
-courses. It uses `httpx` for HTTP requests, bounded concurrency for fast
-downloads, and `uv` for reproducible Python environments.
+> **The best CLI tool for legally downloading Maktabkhooneh courses.**
+
+`maktabdl` is a fast, feature-rich asynchronous command-line downloader for
+Maktabkhooneh. It is designed for learners who want a dependable way to save
+course videos and related material for offline use while respecting their
+access rights. It uses `httpx` for high-performance HTTP requests, bounded
+concurrency for fast downloads, and `uv` for reproducible Python environments.
 
 Only download material that you are legally allowed to access.
+
+## Why maktabdl?
+
+- **Fast by design:** asynchronous downloads with configurable concurrency.
+- **Quality control:** request 480p, 720p, or 1080p, with clear fallback behavior.
+- **Reliable transfers:** retries, timeouts, resume support, and `.part` files.
+- **Complete course archives:** videos, subtitles, and available attachments.
+- **Readable organization:** chapter-aware progress, quality-aware names, and
+  clean Persian/English filenames.
+- **Simple workflow:** one login command, reusable sessions, and helpful CLI
+  examples built into `--help`.
+
+If you have legitimate access to Maktabkhooneh content, `maktabdl` gives you a
+polished, scriptable, and privacy-conscious way to manage your personal course
+archive.
 
 ## Quick start
 
