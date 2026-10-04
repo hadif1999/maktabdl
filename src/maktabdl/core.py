@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -10,6 +11,7 @@ from html.parser import HTMLParser
 
 import httpx
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, DownloadColumn, TimeRemainingColumn
 
 from .session import cookie_header, load_session, save_session, session_cookie
@@ -131,6 +133,7 @@ class MaktabClient:
         self.timeout = timeout
         self.retries = max(0, retries)
         self.verbose = verbose
+        self._progress: Progress | None = None
         self.sem = asyncio.Semaphore(max(1, concurrency))
         self.http = httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers={"user-agent": UA, "accept-language": "en-US,en;q=0.9,fa;q=0.8"})
 
@@ -149,6 +152,71 @@ class MaktabClient:
     def _retryable_status(status: int) -> bool:
         return status == 408 or status == 429 or status >= 500
 
+    def _error_reason(self, error: BaseException | str) -> str:
+        if isinstance(error, httpx.TimeoutException):
+            phase = error.__class__.__name__.removesuffix("Timeout").lower()
+            return f"{phase or 'request'} timeout ({self.timeout:g}s limit)"
+        reason = str(error).strip()
+        if reason:
+            return reason
+        return error.__class__.__name__ if isinstance(error, BaseException) else "unknown error"
+
+    async def _wait_to_retry(
+        self,
+        operation: str,
+        attempt: int,
+        attempts: int,
+        error: BaseException | str,
+        *,
+        progress: Progress | None = None,
+        task_id: int | None = None,
+    ) -> None:
+        retry_total = attempts - 1
+        operation_text = escape(operation)
+        reason = escape(self._error_reason(error))
+        status = "TIMEOUT" if isinstance(error, httpx.TimeoutException) else "RETRY"
+        console.print(
+            f"[yellow]↻ {status}[/yellow] [bold]{operation_text}[/bold] "
+            f"retry {attempt}/{retry_total} in [bold cyan]{RETRY_DELAY_SECONDS}s[/bold cyan] "
+            f"— {reason}"
+        )
+        shared = progress if progress is not None else self._progress
+        # Reuse the course display; standalone login retries get one temporary row.
+        display_context = nullcontext(shared) if shared is not None else Progress(
+            SpinnerColumn(), TextColumn("{task.description}"), console=console, transient=True,
+        )
+        with display_context as display:
+            owns_task = task_id is None
+            if owns_task:
+                task_id = display.add_task(operation_text, total=None)
+            try:
+                for remaining in range(RETRY_DELAY_SECONDS, 0, -1):
+                    display.update(
+                        task_id,
+                        description=(
+                            f"[yellow]{status} · RETRY {attempt}/{retry_total}[/yellow] "
+                            f"{operation_text} • next in [bold cyan]{remaining}s[/bold cyan]"
+                        ),
+                        refresh=True,
+                    )
+                    await asyncio.sleep(1)
+            finally:
+                if owns_task:
+                    display.remove_task(task_id)
+                else:
+                    display.update(task_id, description=operation_text, refresh=True)
+        console.print(
+            f"[cyan]→ RETRYING[/cyan] [bold]{operation_text}[/bold] "
+            f"attempt {attempt + 1}/{attempts}"
+        )
+
+    def _report_error(self, operation: str, error: BaseException | str) -> None:
+        status = "TIMEOUT" if isinstance(error, httpx.TimeoutException) else "ERROR"
+        console.print(
+            f"[red]✖ {status}[/red] [bold]{escape(operation)}[/bold] "
+            f"— {escape(self._error_reason(error))}"
+        )
+
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         attempts = self.retries + 1
         for attempt in range(1, attempts + 1):
@@ -156,23 +224,31 @@ class MaktabClient:
                 async with self.sem:
                     response = await self.http.request(method, url, **kwargs)
                 if response.status_code >= 400:
+                    detail = response.text[:300].strip().replace("\n", " ")
                     if self._retryable_status(response.status_code) and attempt < attempts:
                         await response.aclose()
-                        await asyncio.sleep(RETRY_DELAY_SECONDS)
+                        await self._wait_to_retry(
+                            f"{method} {url}",
+                            attempt,
+                            attempts,
+                            f"HTTP {response.status_code}" + (f": {detail}" if detail else ""),
+                        )
                         continue
-                    detail = response.text[:300].strip().replace("\n", " ")
                     await response.aclose()
-                    raise RuntimeError(
+                    error = RuntimeError(
                         f"{method} {url} failed with HTTP {response.status_code}"
                         + (f": {detail}" if detail else "")
                     )
+                    self._report_error(f"{method} {url}", error)
+                    raise error
                 return response
             except httpx.RequestError as error:
                 if attempt >= attempts:
+                    self._report_error(f"{method} {url}", error)
                     raise RuntimeError(
-                        f"{method} {url} failed after {self.retries} retries: {error}"
+                        f"{method} {url} failed after {self.retries} retries: {self._error_reason(error)}"
                     ) from error
-                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                await self._wait_to_retry(f"{method} {url}", attempt, attempts, error)
         raise RuntimeError(f"{method} {url} failed unexpectedly")
 
     async def json(self, url: str, referer: str, **kwargs) -> dict:
@@ -278,7 +354,7 @@ class MaktabClient:
         part = target.with_name(target.name + ".part")
         offset = 0 if sample_bytes else (part.stat().st_size if part.exists() else 0)
         headers = self.headers(referer, "video/mp4,application/octet-stream,*/*")
-        task_id = progress.add_task(label or target.name, total=None) if progress else None
+        task_id = progress.add_task(escape(label or target.name), total=None) if progress else None
         if sample_bytes:
             headers["range"] = f"bytes=0-{sample_bytes - 1}"
         elif offset:
@@ -290,15 +366,8 @@ class MaktabClient:
                     async with self.http.stream("GET", url, headers=headers) as response:
                         if response.status_code >= 400:
                             detail = (await response.aread()).decode(errors="replace")[:200].strip().replace("\n", " ")
-                            if self._retryable_status(response.status_code):
-                                if attempt < attempts:
-                                    await asyncio.sleep(RETRY_DELAY_SECONDS)
-                                    continue
-                                raise RuntimeError(
-                                    f"download {url} failed with HTTP {response.status_code}"
-                                    + (f": {detail}" if detail else "")
-                                )
-                            raise _NonRetryableDownloadError(
+                            error_type = RuntimeError if self._retryable_status(response.status_code) else _NonRetryableDownloadError
+                            raise error_type(
                                 f"download {url} failed with HTTP {response.status_code}"
                                 + (f": {detail}" if detail else "")
                             )
@@ -329,18 +398,24 @@ class MaktabClient:
                 part.replace(target)
                 return "downloaded"
             except (httpx.HTTPError, OSError, RuntimeError) as error:
-                if isinstance(error, _NonRetryableDownloadError):
-                    raise
-                if task_id is not None:
-                    if attempt >= attempts:
-                        progress.update(task_id, description=f"[red]FAILED[/red] {label or target.name}")
-                    else:
-                        progress.update(task_id, description=f"{label or target.name} (retry {attempt}/{self.retries})")
-                if attempt >= attempts:
+                if attempt >= attempts or isinstance(error, _NonRetryableDownloadError):
+                    if task_id is not None:
+                        status = "TIMEOUT" if isinstance(error, httpx.TimeoutException) else "ERROR"
+                        progress.update(task_id, description=f"[red]{status}[/red] {escape(label or target.name)}")
+                    self._report_error(label or target.name, error)
+                    if isinstance(error, _NonRetryableDownloadError):
+                        raise
                     raise RuntimeError(
-                        f"download failed for {target} after {self.retries} retries: {error}"
+                        f"download failed for {target} after {self.retries} retries: {self._error_reason(error)}"
                     ) from error
-                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                await self._wait_to_retry(
+                    label or target.name,
+                    attempt,
+                    attempts,
+                    error,
+                    progress=progress,
+                    task_id=task_id,
+                )
         raise AssertionError("unreachable")
 
     async def download_course(self, course: CourseRef, output: Path, folder_name: str | None, quality: int, sample_bytes: int) -> None:
@@ -363,40 +438,44 @@ class MaktabClient:
             TimeRemainingColumn(),
             console=console,
         )
-        with progress:
-            for chapter_index, chapter in enumerate(chapters, 1):
-                units = chapter.get("units") if lms else chapter.get("unit_set", [])
-                if not isinstance(units, list):
-                    continue
-                chapter_name = str(chapter.get("title") or chapter.get("slug") or "chapter")
-                chapter_label = f"Chapter {chapter_index:02d} / {chapter_name}"
-                chapter_dir = root / download_name(f"chapter-{chapter_index:02d}", chapter_name, quality)
-                jobs = []
-                for unit_index, unit in enumerate(units, 1):
-                    if unit.get("status") is False or unit.get("locked") is True:
+        self._progress = progress
+        try:
+            with progress:
+                for chapter_index, chapter in enumerate(chapters, 1):
+                    units = chapter.get("units") if lms else chapter.get("unit_set", [])
+                    if not isinstance(units, list):
                         continue
-                    is_video = unit.get("type") == 1 if lms else unit.get("type") == "lecture"
-                    if not is_video:
-                        continue
-                    jobs.append(
-                        self._download_unit(
-                            course,
-                            chapter,
-                            unit,
-                            chapter_dir,
-                            unit_index,
-                            quality,
-                            sample_bytes,
-                            lms,
-                            progress=progress,
-                            chapter_label=chapter_label,
+                    chapter_name = str(chapter.get("title") or chapter.get("slug") or "chapter")
+                    chapter_label = f"Chapter {chapter_index:02d} / {chapter_name}"
+                    chapter_dir = root / download_name(f"chapter-{chapter_index:02d}", chapter_name, quality)
+                    jobs = []
+                    for unit_index, unit in enumerate(units, 1):
+                        if unit.get("status") is False or unit.get("locked") is True:
+                            continue
+                        is_video = unit.get("type") == 1 if lms else unit.get("type") == "lecture"
+                        if not is_video:
+                            continue
+                        jobs.append(
+                            self._download_unit(
+                                course,
+                                chapter,
+                                unit,
+                                chapter_dir,
+                                unit_index,
+                                quality,
+                                sample_bytes,
+                                lms,
+                                progress=progress,
+                                chapter_label=chapter_label,
+                            )
                         )
-                    )
-                if not jobs:
-                    continue
-                console.print(f"[bold cyan]{chapter_label}[/bold cyan]")
-                results = await asyncio.gather(*jobs, return_exceptions=True)
-                failures.extend(result for result in results if isinstance(result, BaseException))
+                    if not jobs:
+                        continue
+                    console.print(f"[bold cyan]{chapter_label}[/bold cyan]")
+                    results = await asyncio.gather(*jobs, return_exceptions=True)
+                    failures.extend(result for result in results if isinstance(result, BaseException))
+        finally:
+            self._progress = None
         if failures:
             details = "; ".join(str(error) for error in failures)
             raise RuntimeError(f"{len(failures)} download(s) failed: {details}")

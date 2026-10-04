@@ -108,6 +108,8 @@ uv run maktabdl download COURSE_URL [options]
 The downloader supports both legacy URLs and LMS URLs. It skips existing files,
 resumes interrupted `.part` files with HTTP range requests, retries transient
 failures, and downloads available subtitles and attachments beside each video.
+The terminal shows styled `RETRY`, `TIMEOUT`, and `ERROR` statuses, including the
+retry number, timeout duration, and seconds until the next attempt.
 
 ## Quality and route behavior
 

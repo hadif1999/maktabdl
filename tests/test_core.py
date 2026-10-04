@@ -106,6 +106,7 @@ async def test_async_download_updates_shared_progress(tmp_path: Path):
 async def test_download_retries_transient_http_failure(tmp_path: Path, monkeypatch):
     calls = 0
     delays = []
+    messages = []
 
     async def fake_sleep(delay):
         delays.append(delay)
@@ -119,6 +120,7 @@ async def test_download_retries_transient_http_failure(tmp_path: Path, monkeypat
 
     client = MaktabClient(cookie="sessionid=test", retries=1)
     monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("maktabdl.core.console.print", lambda *args, **kwargs: messages.append(" ".join(map(str, args))))
     await client.http.aclose()
     client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     target = tmp_path / "retry.mp4"
@@ -127,7 +129,8 @@ async def test_download_retries_transient_http_failure(tmp_path: Path, monkeypat
     finally:
         await client.close()
     assert calls == 2
-    assert delays == [10]
+    assert delays == [1] * 10
+    assert any("RETRY" in message and "10s" in message for message in messages)
     assert target.read_bytes() == b"hello"
 
 
@@ -135,6 +138,7 @@ async def test_download_retries_transient_http_failure(tmp_path: Path, monkeypat
 async def test_api_retries_wait_ten_seconds(monkeypatch):
     calls = 0
     delays = []
+    messages = []
 
     async def fake_sleep(delay):
         delays.append(delay)
@@ -146,6 +150,7 @@ async def test_api_retries_wait_ten_seconds(monkeypatch):
         return httpx.Response(status, content=b"{}", request=request)
 
     monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("maktabdl.core.console.print", lambda *args, **kwargs: messages.append(" ".join(map(str, args))))
     client = MaktabClient(retries=1)
     await client.http.aclose()
     client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -156,12 +161,46 @@ async def test_api_retries_wait_ten_seconds(monkeypatch):
         await client.close()
 
     assert calls == 2
-    assert delays == [10]
+    assert delays == [1] * 10
+    assert any("RETRY" in message and "10s" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_api_timeout_retry_reports_timeout_and_configured_seconds(monkeypatch):
+    calls = 0
+    delays = []
+    messages = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("read timed out", request=request)
+        return httpx.Response(200, content=b"{}", request=request)
+
+    monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("maktabdl.core.console.print", lambda *args, **kwargs: messages.append(" ".join(map(str, args))))
+    client = MaktabClient(timeout=60, retries=1)
+    await client.http.aclose()
+    client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        response = await client._request("GET", "https://api.example/timeout")
+        await response.aclose()
+    finally:
+        await client.close()
+
+    assert calls == 2
+    assert delays == [1] * 10
+    assert any("TIMEOUT" in message and "60s" in message for message in messages)
 
 
 @pytest.mark.asyncio
 async def test_download_reports_non_retryable_http_error(tmp_path: Path, monkeypatch):
     delays = []
+    messages = []
 
     async def fake_sleep(delay):
         delays.append(delay)
@@ -171,6 +210,7 @@ async def test_download_reports_non_retryable_http_error(tmp_path: Path, monkeyp
 
     client = MaktabClient(cookie="sessionid=test", retries=3)
     monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("maktabdl.core.console.print", lambda *args, **kwargs: messages.append(" ".join(map(str, args))))
     await client.http.aclose()
     client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
@@ -179,6 +219,88 @@ async def test_download_reports_non_retryable_http_error(tmp_path: Path, monkeyp
     finally:
         await client.close()
     assert delays == []
+    assert any("ERROR" in message and "404" in message for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["http", "timeout"])
+async def test_download_retry_countdown_and_recovery(tmp_path, monkeypatch, failure):
+    from io import StringIO
+    from rich.console import Console
+    from rich.progress import Progress
+
+    terminal = Console(file=StringIO(), force_terminal=True, width=160)
+    monkeypatch.setattr("maktabdl.core.console", terminal)
+    progress = Progress(console=terminal, auto_refresh=False)
+    descriptions = []
+    calls = 0
+    label = "Chapter 01 / [Introduction] / video-01"
+
+    async def fake_sleep(seconds):
+        assert seconds == 1
+        descriptions.append(progress.tasks[0].description)
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("", request=request)
+            return httpx.Response(503, content=b"busy", request=request)
+        return httpx.Response(200, content=b"hello", request=request)
+
+    monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
+    client = MaktabClient(retries=1, timeout=25)
+    await client.http.aclose()
+    client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await client.download("https://cdn.example/video", tmp_path / "video.mp4", "https://example.com", label=label, progress=progress)
+    finally:
+        await client.close()
+
+    assert len(descriptions) == 10
+    for seconds, description in zip(range(10, 0, -1), descriptions):
+        assert f"{seconds}s" in description
+        assert "1/1" in description
+    assert progress.tasks[0].description == label
+    assert (tmp_path / "video.mp4").read_bytes() == b"hello"
+    output = terminal.file.getvalue()
+    assert "25s" in output if failure == "timeout" else "503" in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["http", "timeout"])
+async def test_exhausted_download_retry_reports_one_final_error(tmp_path, monkeypatch, failure):
+    from io import StringIO
+    from rich.console import Console
+    from rich.progress import Progress
+
+    terminal = Console(file=StringIO(), force_terminal=False, width=200)
+    monkeypatch.setattr("maktabdl.core.console", terminal)
+    progress = Progress(console=terminal, auto_refresh=False)
+    delays = []
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+
+    async def handler(request):
+        if failure == "timeout":
+            raise httpx.ConnectTimeout("", request=request)
+        return httpx.Response(503, content=b"busy", request=request)
+
+    monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
+    client = MaktabClient(retries=1, timeout=25)
+    await client.http.aclose()
+    client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(RuntimeError, match="25s" if failure == "timeout" else "HTTP 503"):
+            await client.download("https://cdn.example/video", tmp_path / "video.mp4", "https://example.com", progress=progress)
+    finally:
+        await client.close()
+
+    assert delays == [1] * 10
+    assert "TIMEOUT" in progress.tasks[0].description if failure == "timeout" else "ERROR" in progress.tasks[0].description
+    assert terminal.file.getvalue().count("✖") == 1
 
 
 @pytest.mark.asyncio
