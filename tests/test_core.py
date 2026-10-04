@@ -30,6 +30,7 @@ def test_session_round_trip_and_legacy_file(tmp_path: Path):
 
 def test_safe_name_uses_underscores_for_folder_defaults():
     assert safe_name("A course / part", underscores=True) == "A_course_part"
+    assert safe_name("%D8%A2%D9%85%D9%88%D8%B2%D8%B4_agentic_ai", underscores=True) == "آموزش_agentic_ai"
     assert quality_suffix("lecture", 480) == "lecture_480p"
     assert quality_suffix("lecture_480p", 480) == "lecture_480p"
 

@@ -14,6 +14,7 @@ graphify-out/
 
 # User data and downloads
 download/
+maktabdl_downloads/
 session.json
 *.part
 *.sample.mp4
