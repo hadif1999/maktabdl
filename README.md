@@ -34,7 +34,9 @@ uv run maktabdl download \
   --quality 720
 ```
 
-The default output is `./maktabdl_downloads/<course_name>/`. Customize it with `-o` and
+The default output is `./maktabdl_downloads/course-720p-<course_name>/`. Names begin with an ASCII
+prefix and quality marker so mixed Persian/English names remain left-to-right in file
+managers. Customize the output with `-o` and
 the course folder name with `-f`:
 
 ```bash
@@ -116,16 +118,17 @@ export MK_COOKIE_FILE="$HOME/.config/maktabdl/cookie.txt"
 ## Output layout
 
 ```text
-maktabdl_downloads/<course_name>_720p/
-  01 - <chapter>_720p/
-    01 - <lecture>_720p.mp4
-    01 - <lecture>_720p.vtt
-    01 - <lecture>_720p - <attachment>
+maktabdl_downloads/
+  course-720p-<course_name>/
+    chapter-01-720p-<chapter>/
+      video-01-720p-<lecture>.mp4
+      video-01-720p-<lecture>.vtt
+      video-01-720p-<lecture>--<attachment>
 ```
 
-Quality is included in course folders, chapter folders, video filenames,
-subtitle filenames, and attachment prefixes. Sample downloads use
-`_720p.sample.mp4` filenames. Interrupted full downloads keep a `.part` file
+Quality is included immediately after the ASCII type/index prefix in course folders,
+chapter folders, video filenames, subtitle filenames, and attachment prefixes. Sample
+downloads use `-720p-<lecture>.sample.mp4` filenames. Interrupted full downloads keep a `.part` file
 so a later run can continue from the saved offset. Folder names use the
 requested quality; individual files use the selected quality when a fallback
 was required.

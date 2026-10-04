@@ -35,6 +35,19 @@ def test_safe_name_uses_underscores_for_folder_defaults():
     assert quality_suffix("lecture_480p", 480) == "lecture_480p"
 
 
+def test_ltr_download_names_anchor_mixed_persian_and_english():
+    from maktabdl.core import download_name
+
+    course = download_name("course", "آموزش agentic ai پایتون mk15783", 720)
+    chapter = download_name("chapter-01", "مقدمه", 720)
+    video = download_name("video-01", "معرفی agentic AI", 720)
+    assert course == "course-720p-آموزش_agentic_ai_پایتون_mk15783"
+    assert chapter == "chapter-01-720p-مقدمه"
+    assert video == "video-01-720p-معرفی_agentic_AI"
+    assert course[0].isascii() and video[0].isascii()
+    assert "\u202a" not in course and "\u202b" not in course
+
+
 @pytest.mark.asyncio
 async def test_async_download_writes_file(tmp_path: Path):
     async def handler(request: httpx.Request) -> httpx.Response:

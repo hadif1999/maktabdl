@@ -59,6 +59,15 @@ def quality_suffix(value: str, quality: int) -> str:
     return value if value.endswith(suffix) else f"{value}{suffix}"
 
 
+def download_name(prefix: str, value: str, quality: int) -> str:
+    """Build a filename component with an ASCII left-to-right anchor.
+
+    The prefix and quality come first so file managers render mixed Persian
+    and English names predictably while retaining the original title.
+    """
+    return f"{prefix}-{quality}p-{safe_name(value, underscores=True)}"
+
+
 def _quality_number(item: dict) -> int | None:
     for key in ("resolution", "height", "quality"):
         value = item.get(key)
@@ -312,16 +321,16 @@ class MaktabClient:
             raise RuntimeError("session is invalid or expired; run `maktabdl login` again")
         data = await self.outline(course)
         chapters = data.get("chapters", [])
-        folder = safe_name(folder_name or course.slug.replace("-", " "), underscores=True)
-        root = output / quality_suffix(folder, quality)
+        folder = folder_name or course.slug.replace("-", " ")
+        root = output / download_name("course", folder, quality)
         root.mkdir(parents=True, exist_ok=True)
         lms = course.lms or any(isinstance(c.get("units"), list) for c in chapters if isinstance(c, dict))
         for chapter_index, chapter in enumerate(chapters, 1):
             units = chapter.get("units") if lms else chapter.get("unit_set", [])
             if not isinstance(units, list):
                 continue
-            chapter_name = safe_name(str(chapter.get("title") or chapter.get("slug") or "chapter"))
-            chapter_dir = root / quality_suffix(f"{chapter_index:02d} - {chapter_name}", quality)
+            chapter_name = str(chapter.get("title") or chapter.get("slug") or "chapter")
+            chapter_dir = root / download_name(f"chapter-{chapter_index:02d}", chapter_name, quality)
             jobs = []
             for unit_index, unit in enumerate(units, 1):
                 if unit.get("status") is False or unit.get("locked") is True:
@@ -333,8 +342,8 @@ class MaktabClient:
             await asyncio.gather(*jobs)
 
     async def _download_unit(self, course: CourseRef, chapter: dict, unit: dict, directory: Path, index: int, quality: int, sample_bytes: int, lms: bool) -> None:
-        title = safe_name(str(unit.get("title") or unit.get("slug") or "lecture"))
-        base = f"{index:02d} - {title}"
+        title = str(unit.get("title") or unit.get("slug") or "lecture")
+        base = f"video-{index:02d}"
         lecture_url = f"{ORIGIN}/lms/course/{course.slug}/unit/{unit.get('id') or unit.get('unit_id')}/" if lms else f"{ORIGIN}/course/{course.slug}/{chapter.get('slug')}-ch{chapter.get('id')}/{unit.get('slug')}/"
         caption = None
         attachments: list[str] = []
@@ -356,7 +365,7 @@ class MaktabClient:
         if not video_url:
             console.print(f"[yellow]Skipping {base}: no downloadable video URL[/yellow]")
             return
-        file_base = quality_suffix(base, selected or quality)
+        file_base = download_name(base, title, selected or quality)
         final = directory / (file_base + (".sample.mp4" if sample_bytes else ".mp4"))
         status = await self.download(video_url, final, lecture_url, sample_bytes, base)
         console.print(f"[green]{status.upper()}: {final}[/green]")
@@ -368,7 +377,7 @@ class MaktabClient:
             await self.download(caption_url, directory / subtitle_name, lecture_url, label=subtitle_name)
         for attachment in attachments:
             filename = Path(urlparse(attachment).path).name or "attachment.bin"
-            await self.download(attachment, directory / f"{file_base} - {safe_name(filename)}", lecture_url, label=filename)
+            await self.download(attachment, directory / f"{file_base}--{safe_name(filename, underscores=True)}", lecture_url, label=filename)
 
 
 async def login_and_save(email: str, password: str, session_file: Path, retries: int = 3, timeout: float = 60.0) -> None:
