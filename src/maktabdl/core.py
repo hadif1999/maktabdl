@@ -255,7 +255,16 @@ class MaktabClient:
         finally:
             await response.aclose()
 
-    async def download(self, url: str, target: Path, referer: str, sample_bytes: int = 0, label: str = "") -> str:
+    async def download(
+        self,
+        url: str,
+        target: Path,
+        referer: str,
+        sample_bytes: int = 0,
+        label: str = "",
+        *,
+        progress: Progress | None = None,
+    ) -> str:
         if target.exists() and target.stat().st_size > 0 and not sample_bytes:
             return "exists"
         if sample_bytes and target.exists() and target.stat().st_size >= sample_bytes:
@@ -264,6 +273,7 @@ class MaktabClient:
         part = target.with_name(target.name + ".part")
         offset = 0 if sample_bytes else (part.stat().st_size if part.exists() else 0)
         headers = self.headers(referer, "video/mp4,application/octet-stream,*/*")
+        task_id = progress.add_task(label or target.name, total=None) if progress else None
         if sample_bytes:
             headers["range"] = f"bytes=0-{sample_bytes - 1}"
         elif offset:
@@ -292,22 +302,28 @@ class MaktabClient:
                         total = response.headers.get("content-length")
                         total_bytes = int(total) + offset if total and not sample_bytes else (sample_bytes or None)
                         downloaded = offset
+                        if task_id is not None:
+                            progress.update(task_id, total=total_bytes, completed=downloaded)
                         with part.open(mode) as output:
-                            with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(), DownloadColumn(), TimeRemainingColumn(), transient=True, console=console) as progress:
-                                task = progress.add_task(label or target.name, total=total_bytes, completed=downloaded)
-                                async for chunk in response.aiter_bytes(1024 * 128):
-                                    if sample_bytes and downloaded + len(chunk) > sample_bytes:
-                                        chunk = chunk[: sample_bytes - downloaded]
-                                    if not chunk:
-                                        break
-                                    output.write(chunk)
-                                    downloaded += len(chunk)
-                                    progress.update(task, completed=downloaded)
-                                    if sample_bytes and downloaded >= sample_bytes:
-                                        break
+                            async for chunk in response.aiter_bytes(1024 * 128):
+                                if sample_bytes and downloaded + len(chunk) > sample_bytes:
+                                    chunk = chunk[: sample_bytes - downloaded]
+                                if not chunk:
+                                    break
+                                output.write(chunk)
+                                downloaded += len(chunk)
+                                if task_id is not None:
+                                    progress.update(task_id, completed=downloaded)
+                                if sample_bytes and downloaded >= sample_bytes:
+                                    break
                 part.replace(target)
                 return "downloaded"
             except (httpx.HTTPError, OSError, RuntimeError) as error:
+                if task_id is not None:
+                    if attempt >= attempts:
+                        progress.update(task_id, description=f"[red]FAILED[/red] {label or target.name}")
+                    else:
+                        progress.update(task_id, description=f"{label or target.name} (retry {attempt}/{self.retries})")
                 if attempt >= attempts:
                     raise RuntimeError(
                         f"download failed for {target} after {self.retries} retries: {error}"
@@ -318,30 +334,47 @@ class MaktabClient:
     async def download_course(self, course: CourseRef, output: Path, folder_name: str | None, quality: int, sample_bytes: int) -> None:
         profile = await self.verify(course.url)
         if not profile.get("auth", {}).get("details", {}).get("is_authenticated"):
-            raise RuntimeError("session is invalid or expired; run `maktabdl login` again")
+            raise RuntimeError("session is invalid or expired; run `uv run maktabdl login` again")
         data = await self.outline(course)
         chapters = data.get("chapters", [])
         folder = folder_name or course.slug.replace("-", " ")
         root = output / download_name("course", folder, quality)
         root.mkdir(parents=True, exist_ok=True)
         lms = course.lms or any(isinstance(c.get("units"), list) for c in chapters if isinstance(c, dict))
-        for chapter_index, chapter in enumerate(chapters, 1):
-            units = chapter.get("units") if lms else chapter.get("unit_set", [])
-            if not isinstance(units, list):
-                continue
-            chapter_name = str(chapter.get("title") or chapter.get("slug") or "chapter")
-            chapter_dir = root / download_name(f"chapter-{chapter_index:02d}", chapter_name, quality)
-            jobs = []
-            for unit_index, unit in enumerate(units, 1):
-                if unit.get("status") is False or unit.get("locked") is True:
+        failures: list[BaseException] = []
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            DownloadColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        )
+        with progress:
+            for chapter_index, chapter in enumerate(chapters, 1):
+                units = chapter.get("units") if lms else chapter.get("unit_set", [])
+                if not isinstance(units, list):
                     continue
-                is_video = unit.get("type") == 1 if lms else unit.get("type") == "lecture"
-                if not is_video:
+                chapter_name = str(chapter.get("title") or chapter.get("slug") or "chapter")
+                chapter_dir = root / download_name(f"chapter-{chapter_index:02d}", chapter_name, quality)
+                jobs = []
+                for unit_index, unit in enumerate(units, 1):
+                    if unit.get("status") is False or unit.get("locked") is True:
+                        continue
+                    is_video = unit.get("type") == 1 if lms else unit.get("type") == "lecture"
+                    if not is_video:
+                        continue
+                    jobs.append(self._download_unit(course, chapter, unit, chapter_dir, unit_index, quality, sample_bytes, lms, progress=progress))
+                if not jobs:
                     continue
-                jobs.append(self._download_unit(course, chapter, unit, chapter_dir, unit_index, quality, sample_bytes, lms))
-            await asyncio.gather(*jobs)
+                results = await asyncio.gather(*jobs, return_exceptions=True)
+                failures.extend(result for result in results if isinstance(result, BaseException))
+        if failures:
+            details = "; ".join(str(error) for error in failures)
+            raise RuntimeError(f"{len(failures)} download(s) failed: {details}")
 
-    async def _download_unit(self, course: CourseRef, chapter: dict, unit: dict, directory: Path, index: int, quality: int, sample_bytes: int, lms: bool) -> None:
+    async def _download_unit(self, course: CourseRef, chapter: dict, unit: dict, directory: Path, index: int, quality: int, sample_bytes: int, lms: bool, *, progress: Progress | None = None) -> None:
         title = str(unit.get("title") or unit.get("slug") or "lecture")
         base = f"video-{index:02d}"
         lecture_url = f"{ORIGIN}/lms/course/{course.slug}/unit/{unit.get('id') or unit.get('unit_id')}/" if lms else f"{ORIGIN}/course/{course.slug}/{chapter.get('slug')}-ch{chapter.get('id')}/{unit.get('slug')}/"
@@ -367,17 +400,17 @@ class MaktabClient:
             return
         file_base = download_name(base, title, selected or quality)
         final = directory / (file_base + (".sample.mp4" if sample_bytes else ".mp4"))
-        status = await self.download(video_url, final, lecture_url, sample_bytes, base)
+        status = await self.download(video_url, final, lecture_url, sample_bytes, base, progress=progress)
         console.print(f"[green]{status.upper()}: {final}[/green]")
         if caption:
             subtitle_name = file_base + ".vtt"
             caption_url = caption
             if "file=" in caption_url and caption_url.endswith("file="):
                 caption_url += subtitle_name
-            await self.download(caption_url, directory / subtitle_name, lecture_url, label=subtitle_name)
+            await self.download(caption_url, directory / subtitle_name, lecture_url, label=subtitle_name, progress=progress)
         for attachment in attachments:
             filename = Path(urlparse(attachment).path).name or "attachment.bin"
-            await self.download(attachment, directory / f"{file_base}--{safe_name(filename, underscores=True)}", lecture_url, label=filename)
+            await self.download(attachment, directory / f"{file_base}--{safe_name(filename, underscores=True)}", lecture_url, label=filename, progress=progress)
 
 
 async def login_and_save(email: str, password: str, session_file: Path, retries: int = 3, timeout: float = 60.0) -> None:
@@ -398,7 +431,7 @@ async def run_download(url: str, session_file: Path, output: Path, folder_name: 
         if not cookie and os.getenv("MK_COOKIE_FILE"):
             cookie = Path(os.environ["MK_COOKIE_FILE"]).read_text(encoding="utf-8").strip()
     if not cookie:
-        raise RuntimeError(f"no session found at {session_file}; run `maktabdl login ... -o {session_file.parent}` first")
+        raise RuntimeError(f"no session found at {session_file}; run `uv run maktabdl login ... -o {session_file.parent}` first")
     course = parse_course_url(url)
     client = MaktabClient(cookie=cookie, concurrency=concurrency, retries=retries, timeout=timeout, verbose=verbose)
     try:

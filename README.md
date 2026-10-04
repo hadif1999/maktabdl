@@ -60,7 +60,7 @@ uv run maktabdl download --help
 ### Login
 
 ```text
-maktabdl login -u USERNAME -p PASSWORD [-o SESSION_DIRECTORY]
+uv run maktabdl login -u USERNAME -p PASSWORD [-o SESSION_DIRECTORY]
 ```
 
 The session file stores cookies in a multi-user JSON structure and is created
@@ -73,7 +73,7 @@ history.
 ### Download
 
 ```text
-maktabdl download COURSE_URL [options]
+uv run maktabdl download COURSE_URL [options]
 ```
 
 - `-s`, `--session-file`: exact session file path; default `./session.json`.

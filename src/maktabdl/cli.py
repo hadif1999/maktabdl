@@ -8,11 +8,11 @@ from . import __version__
 from .core import login_and_save, run_download
 
 EXAMPLES = """Examples:
-  maktabdl login -u you@example.com -p 'Secret123' -o ~/.config/maktabdl
-  maktabdl download 'https://maktabkhooneh.org/course/<slug>/' -s ~/.config/maktabdl/session.json
-  maktabdl download 'https://maktabkhooneh.org/lms/course/<slug>/unit/<id>/' --quality 1080 -o ./videos -f my_course
-  maktabdl download 'https://maktabkhooneh.org/course/<slug>/' --quality 480 --retry 5 --timeout 90
-  maktabdl download 'https://maktabkhooneh.org/course/<slug>/' --sample-bytes 65536
+  uv run maktabdl login -u you@example.com -p 'Secret123' -o ~/.config/maktabdl
+  uv run maktabdl download 'https://maktabkhooneh.org/course/<slug>/' -s ~/.config/maktabdl/session.json
+  uv run maktabdl download 'https://maktabkhooneh.org/lms/course/<slug>/unit/<id>/' --quality 1080 -o ./videos -f my_course
+  uv run maktabdl download 'https://maktabkhooneh.org/course/<slug>/' --quality 480 --retry 5 --timeout 90
+  uv run maktabdl download 'https://maktabkhooneh.org/course/<slug>/' --sample-bytes 65536
 """
 
 

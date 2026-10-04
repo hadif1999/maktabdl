@@ -1,9 +1,10 @@
+import asyncio
 from pathlib import Path
 
 import httpx
 import pytest
 
-from maktabdl.core import MaktabClient, choose_video_url, parse_course_url, quality_suffix, safe_name
+from maktabdl.core import CourseRef, MaktabClient, choose_video_url, parse_course_url, quality_suffix, safe_name
 from maktabdl.session import load_session, save_session, session_cookie
 
 
@@ -65,6 +66,43 @@ async def test_async_download_writes_file(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_async_download_updates_shared_progress(tmp_path: Path):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-length": "5"}, content=b"hello", request=request)
+
+    class RecordingProgress:
+        def __init__(self):
+            self.added = []
+            self.updates = []
+
+        def add_task(self, description, **kwargs):
+            self.added.append((description, kwargs))
+            return 7
+
+        def update(self, task_id, **kwargs):
+            self.updates.append((task_id, kwargs))
+
+    client = MaktabClient(cookie="sessionid=test")
+    await client.http.aclose()
+    client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    progress = RecordingProgress()
+    target = tmp_path / "video.mp4"
+    try:
+        assert await client.download(
+            "https://cdn.example/video.mp4",
+            target,
+            "https://maktabkhooneh.org/",
+            label="video-01",
+            progress=progress,
+        ) == "downloaded"
+    finally:
+        await client.close()
+
+    assert progress.added == [("video-01", {"total": None})]
+    assert progress.updates[-1] == (7, {"completed": 5})
+
+
+@pytest.mark.asyncio
 async def test_download_retries_transient_http_failure(tmp_path: Path):
     calls = 0
 
@@ -100,3 +138,61 @@ async def test_download_reports_non_retryable_http_error(tmp_path: Path):
             await client.download("https://cdn.example/missing.mp4", tmp_path / "missing.mp4", "https://maktabkhooneh.org/")
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_download_course_keeps_one_progress_display_until_all_jobs_finish(monkeypatch, tmp_path: Path):
+    class RecordingProgress:
+        instances = []
+
+        def __init__(self, *args, **kwargs):
+            self.events = []
+            self.tasks = []
+            self.__class__.instances.append(self)
+
+        def __enter__(self):
+            self.events.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self.events.append("exit")
+
+        def add_task(self, description, **kwargs):
+            self.tasks.append(description)
+            return len(self.tasks)
+
+        def update(self, task_id, **kwargs):
+            return None
+
+    monkeypatch.setattr("maktabdl.core.Progress", RecordingProgress)
+
+    class FakeClient(MaktabClient):
+        def __init__(self):
+            super().__init__(concurrency=2)
+            self.events = []
+
+        async def verify(self, referer="://"):
+            return {"auth": {"details": {"is_authenticated": True}}}
+
+        async def outline(self, course):
+            return {"chapters": [{"units": [{"id": 1, "type": 1}, {"id": 2, "type": 1}]}]}
+
+        async def _download_unit(self, course, chapter, unit, directory, index, quality, sample_bytes, lms, *, progress=None):
+            self.events.append(f"start-{unit['id']}")
+            assert progress is RecordingProgress.instances[0]
+            if unit["id"] == 1:
+                self.events.append("failed")
+                raise RuntimeError("one lecture failed")
+            await asyncio.sleep(0.02)
+            self.events.append("finished")
+
+    client = FakeClient()
+    course = CourseRef("https://maktabkhooneh.org/lms/course/test-mk1/unit/1/", "test-mk1", 1, True)
+    try:
+        with pytest.raises(RuntimeError, match="one lecture failed"):
+            await client.download_course(course, tmp_path, None, 720, 0)
+    finally:
+        await client.close()
+
+    assert client.events == ["start-1", "failed", "start-2", "finished"]
+    assert [instance.events for instance in RecordingProgress.instances] == [["enter", "exit"]]
