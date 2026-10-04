@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import html
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -51,6 +50,12 @@ def safe_name(value: str, underscores: bool = False) -> str:
     value = re.sub(r"[/:*?\"<>|\\]", " ", value)
     value = re.sub(r"[\s\u200c\u200f\u202a-\u202e]+", "_" if underscores else " ", value)
     return value.strip(" ._")[:150] or "course"
+
+
+def quality_suffix(value: str, quality: int) -> str:
+    """Append a stable quality suffix to a file or directory component."""
+    suffix = f"_{quality}p"
+    return value if value.endswith(suffix) else f"{value}{suffix}"
 
 
 def _quality_number(item: dict) -> int | None:
@@ -106,9 +111,10 @@ class LectureParser(HTMLParser):
 
 
 class MaktabClient:
-    def __init__(self, cookie: str | None = None, timeout: float = 60.0, concurrency: int = 4, verbose: bool = False) -> None:
+    def __init__(self, cookie: str | None = None, timeout: float = 60.0, retries: int = 3, concurrency: int = 4, verbose: bool = False) -> None:
         self.cookie = cookie
         self.timeout = timeout
+        self.retries = max(0, retries)
         self.verbose = verbose
         self.sem = asyncio.Semaphore(max(1, concurrency))
         self.http = httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers={"user-agent": UA, "accept-language": "en-US,en;q=0.9,fa;q=0.8"})
@@ -124,11 +130,44 @@ class MaktabClient:
     async def close(self) -> None:
         await self.http.aclose()
 
+    @staticmethod
+    def _retryable_status(status: int) -> bool:
+        return status == 408 or status == 429 or status >= 500
+
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        attempts = self.retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                async with self.sem:
+                    response = await self.http.request(method, url, **kwargs)
+                if response.status_code >= 400:
+                    if self._retryable_status(response.status_code) and attempt < attempts:
+                        await response.aclose()
+                        await asyncio.sleep(min(attempt, 5))
+                        continue
+                    detail = response.text[:300].strip().replace("\n", " ")
+                    await response.aclose()
+                    raise RuntimeError(
+                        f"{method} {url} failed with HTTP {response.status_code}"
+                        + (f": {detail}" if detail else "")
+                    )
+                return response
+            except httpx.RequestError as error:
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"{method} {url} failed after {self.retries} retries: {error}"
+                    ) from error
+                await asyncio.sleep(min(attempt, 5))
+        raise RuntimeError(f"{method} {url} failed unexpectedly")
+
     async def json(self, url: str, referer: str, **kwargs) -> dict:
-        async with self.sem:
-            response = await self.http.get(url, headers=self.headers(referer, "application/json"), **kwargs)
-        response.raise_for_status()
-        return response.json()
+        response = await self._request("GET", url, headers=self.headers(referer, "application/json"), **kwargs)
+        try:
+            return response.json()
+        except ValueError as error:
+            raise RuntimeError(f"GET {url} returned invalid JSON") from error
+        finally:
+            await response.aclose()
 
     async def verify(self, referer: str = ORIGIN) -> dict:
         return await self.json(f"{ORIGIN}/api/v1/general/core-data/?profile=1", referer)
@@ -136,28 +175,35 @@ class MaktabClient:
     async def login(self, email: str, password: str) -> str:
         # The current Nuxt frontend uses /signin; the old Django page
         # /accounts/login/ now returns 404.
-        response = await self.http.get(f"{ORIGIN}/signin/", headers={"accept": "text/html", "user-agent": UA})
-        response.raise_for_status()
+        response = await self._request("GET", f"{ORIGIN}/signin/", headers={"accept": "text/html", "user-agent": UA})
+        response_text = response.text
+        await response.aclose()
         csrf = self.http.cookies.get("csrftoken")
         if not csrf:
-            match = re.search(r'name=["\']csrfmiddlewaretoken["\'][^>]+value=["\']([^"\']+)', response.text, re.I)
+            match = re.search(r'name=["\']csrfmiddlewaretoken["\'][^>]+value=["\']([^"\']+)', response_text, re.I)
             csrf = match.group(1) if match else None
         if not csrf:
             try:
-                csrf = (await self.http.get(f"{ORIGIN}/api/v1/general/core-data/?profile=1", headers={"accept": "application/json"})).json().get("auth", {}).get("csrf")
-            except Exception:
+                core_response = await self._request("GET", f"{ORIGIN}/api/v1/general/core-data/?profile=1", headers={"accept": "application/json"})
+                csrf = core_response.json().get("auth", {}).get("csrf")
+                await core_response.aclose()
+            except (RuntimeError, ValueError):
                 csrf = None
         if not csrf:
             raise RuntimeError("could not obtain CSRF token")
         headers = {"accept": "application/json, text/javascript, */*; q=0.01", "content-type": "application/x-www-form-urlencoded; charset=UTF-8", "x-requested-with": "XMLHttpRequest", "x-csrftoken": csrf, "origin": ORIGIN, "referer": f"{ORIGIN}/signin/"}
-        check = await self.http.post(f"{ORIGIN}/api/v1/auth/check-active-user", headers=headers, data={"csrfmiddlewaretoken": csrf, "tessera": email, "g-recaptcha-response": ""})
-        check.raise_for_status()
-        check_data = check.json()
+        check = await self._request("POST", f"{ORIGIN}/api/v1/auth/check-active-user", headers=headers, data={"csrfmiddlewaretoken": csrf, "tessera": email, "g-recaptcha-response": ""})
+        try:
+            check_data = check.json()
+        finally:
+            await check.aclose()
         if check_data.get("status") != "success" or check_data.get("message") != "get-pass":
             raise RuntimeError(f"active-user check failed: {check_data.get('message', check_data.get('status'))}")
-        login = await self.http.post(f"{ORIGIN}/api/v1/auth/login-authentication", headers=headers, data={"csrfmiddlewaretoken": csrf, "tessera": email, "hidden_username": email, "password": password, "g-recaptcha-response": ""})
-        login.raise_for_status()
-        data = login.json()
+        login = await self._request("POST", f"{ORIGIN}/api/v1/auth/login-authentication", headers=headers, data={"csrfmiddlewaretoken": csrf, "tessera": email, "hidden_username": email, "password": password, "g-recaptcha-response": ""})
+        try:
+            data = login.json()
+        finally:
+            await login.aclose()
         if data.get("status") != "success":
             raise RuntimeError(f"login failed: {data.get('message', data.get('status'))}")
         cookies = {
@@ -176,7 +222,9 @@ class MaktabClient:
                 data = await self.json(f"{ORIGIN}/api/v1/lms/courses/{course.course_id}/outline/", course.url)
                 if isinstance(data.get("chapters"), list):
                     return data
-            except httpx.HTTPError:
+            except (httpx.HTTPError, RuntimeError) as error:
+                if "HTTP 401" in str(error) or "HTTP 403" in str(error):
+                    raise
                 pass
         return await self.json(f"{ORIGIN}/api/v1/courses/{course.slug}/chapters/", course.url)
 
@@ -189,12 +237,13 @@ class MaktabClient:
         return (details if isinstance(details, dict) else None, video if isinstance(video, dict) else None)
 
     async def fetch_legacy(self, url: str, referer: str) -> LectureParser:
-        async with self.sem:
-            response = await self.http.get(url, headers=self.headers(referer, "text/html"))
-        response.raise_for_status()
-        parser = LectureParser()
-        parser.feed(response.text)
-        return parser
+        response = await self._request("GET", url, headers=self.headers(referer, "text/html"))
+        try:
+            parser = LectureParser()
+            parser.feed(response.text)
+            return parser
+        finally:
+            await response.aclose()
 
     async def download(self, url: str, target: Path, referer: str, sample_bytes: int = 0, label: str = "") -> str:
         if target.exists() and target.stat().st_size > 0 and not sample_bytes:
@@ -209,10 +258,20 @@ class MaktabClient:
             headers["range"] = f"bytes=0-{sample_bytes - 1}"
         elif offset:
             headers["range"] = f"bytes={offset}-"
-        for attempt in range(1, 4):
+        attempts = self.retries + 1
+        for attempt in range(1, attempts + 1):
             try:
                 async with self.sem:
                     async with self.http.stream("GET", url, headers=headers) as response:
+                        if response.status_code >= 400:
+                            detail = (await response.aread()).decode(errors="replace")[:200].strip().replace("\n", " ")
+                            if self._retryable_status(response.status_code) and attempt < attempts:
+                                await asyncio.sleep(min(attempt, 5))
+                                continue
+                            raise RuntimeError(
+                                f"download {url} failed with HTTP {response.status_code}"
+                                + (f": {detail}" if detail else "")
+                            )
                         if offset and response.status_code != 206:
                             part.unlink(missing_ok=True)
                             offset = 0
@@ -238,26 +297,30 @@ class MaktabClient:
                                         break
                 part.replace(target)
                 return "downloaded"
-            except (httpx.HTTPError, OSError, RuntimeError):
-                if attempt == 3:
-                    raise
+            except (httpx.HTTPError, OSError, RuntimeError) as error:
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"download failed for {target} after {self.retries} retries: {error}"
+                    ) from error
                 await asyncio.sleep(attempt)
         raise AssertionError("unreachable")
 
     async def download_course(self, course: CourseRef, output: Path, folder_name: str | None, quality: int, sample_bytes: int) -> None:
         profile = await self.verify(course.url)
         if not profile.get("auth", {}).get("details", {}).get("is_authenticated"):
-            raise RuntimeError("session is not authenticated")
+            raise RuntimeError("session is invalid or expired; run `maktabdl login` again")
         data = await self.outline(course)
         chapters = data.get("chapters", [])
-        root = output / (folder_name or safe_name(course.slug.replace("-", " "), underscores=True))
+        folder = safe_name(folder_name or course.slug.replace("-", " "), underscores=True)
+        root = output / quality_suffix(folder, quality)
         root.mkdir(parents=True, exist_ok=True)
         lms = course.lms or any(isinstance(c.get("units"), list) for c in chapters if isinstance(c, dict))
         for chapter_index, chapter in enumerate(chapters, 1):
             units = chapter.get("units") if lms else chapter.get("unit_set", [])
             if not isinstance(units, list):
                 continue
-            chapter_dir = root / f"{chapter_index:02d} - {safe_name(str(chapter.get('title') or chapter.get('slug') or 'chapter'))}"
+            chapter_name = safe_name(str(chapter.get("title") or chapter.get("slug") or "chapter"))
+            chapter_dir = root / quality_suffix(f"{chapter_index:02d} - {chapter_name}", quality)
             jobs = []
             for unit_index, unit in enumerate(units, 1):
                 if unit.get("status") is False or unit.get("locked") is True:
@@ -284,6 +347,7 @@ class MaktabClient:
         else:
             parser = await self.fetch_legacy(lecture_url, course.url)
             video_url = next((url for url in parser.sources if "/videos/" in url), None)
+            selected = _quality_number({"download_url": video_url}) if video_url else None
             caption = parser.tracks[0] if parser.tracks else None
             attachments = parser.attachments
             if video_url and not re.search(r"(?:480|720|1080)", video_url):
@@ -291,22 +355,23 @@ class MaktabClient:
         if not video_url:
             console.print(f"[yellow]Skipping {base}: no downloadable video URL[/yellow]")
             return
-        final = directory / (base + (".sample.mp4" if sample_bytes else ".mp4"))
+        file_base = quality_suffix(base, selected or quality)
+        final = directory / (file_base + (".sample.mp4" if sample_bytes else ".mp4"))
         status = await self.download(video_url, final, lecture_url, sample_bytes, base)
         console.print(f"[green]{status.upper()}: {final}[/green]")
         if caption:
-            subtitle_name = base + ".vtt"
+            subtitle_name = file_base + ".vtt"
             caption_url = caption
             if "file=" in caption_url and caption_url.endswith("file="):
                 caption_url += subtitle_name
             await self.download(caption_url, directory / subtitle_name, lecture_url, label=subtitle_name)
         for attachment in attachments:
             filename = Path(urlparse(attachment).path).name or "attachment.bin"
-            await self.download(attachment, directory / f"{base} - {safe_name(filename)}", lecture_url, label=filename)
+            await self.download(attachment, directory / f"{file_base} - {safe_name(filename)}", lecture_url, label=filename)
 
 
-async def login_and_save(email: str, password: str, session_file: Path) -> None:
-    client = MaktabClient()
+async def login_and_save(email: str, password: str, session_file: Path, retries: int = 3, timeout: float = 60.0) -> None:
+    client = MaktabClient(retries=retries, timeout=timeout)
     try:
         cookie = await client.login(email, password)
         save_session(session_file, email, cookie, load_session(session_file))
@@ -315,7 +380,7 @@ async def login_and_save(email: str, password: str, session_file: Path) -> None:
         await client.close()
 
 
-async def run_download(url: str, session_file: Path, output: Path, folder_name: str | None, quality: int, sample_bytes: int, concurrency: int, verbose: bool) -> None:
+async def run_download(url: str, session_file: Path, output: Path, folder_name: str | None, quality: int, sample_bytes: int, concurrency: int, retries: int, timeout: float, verbose: bool) -> None:
     cookie = session_cookie(session_file)
     if not cookie:
         import os
@@ -325,7 +390,7 @@ async def run_download(url: str, session_file: Path, output: Path, folder_name: 
     if not cookie:
         raise RuntimeError(f"no session found at {session_file}; run `maktabdl login ... -o {session_file.parent}` first")
     course = parse_course_url(url)
-    client = MaktabClient(cookie=cookie, concurrency=concurrency, verbose=verbose)
+    client = MaktabClient(cookie=cookie, concurrency=concurrency, retries=retries, timeout=timeout, verbose=verbose)
     try:
         await client.download_course(course, output, folder_name, quality, sample_bytes)
     finally:

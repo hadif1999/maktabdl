@@ -3,7 +3,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from maktabdl.core import MaktabClient, choose_video_url, parse_course_url, safe_name
+from maktabdl.core import MaktabClient, choose_video_url, parse_course_url, quality_suffix, safe_name
 from maktabdl.session import load_session, save_session, session_cookie
 
 
@@ -30,6 +30,8 @@ def test_session_round_trip_and_legacy_file(tmp_path: Path):
 
 def test_safe_name_uses_underscores_for_folder_defaults():
     assert safe_name("A course / part", underscores=True) == "A_course_part"
+    assert quality_suffix("lecture", 480) == "lecture_480p"
+    assert quality_suffix("lecture_480p", 480) == "lecture_480p"
 
 
 @pytest.mark.asyncio
@@ -46,3 +48,41 @@ async def test_async_download_writes_file(tmp_path: Path):
     finally:
         await client.close()
     assert target.read_bytes() == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_download_retries_transient_http_failure(tmp_path: Path):
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, content=b"temporary", request=request)
+        return httpx.Response(200, headers={"content-length": "5"}, content=b"hello", request=request)
+
+    client = MaktabClient(cookie="sessionid=test", retries=1)
+    await client.http.aclose()
+    client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    target = tmp_path / "retry.mp4"
+    try:
+        assert await client.download("https://cdn.example/retry.mp4", target, "https://maktabkhooneh.org/") == "downloaded"
+    finally:
+        await client.close()
+    assert calls == 2
+    assert target.read_bytes() == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_download_reports_non_retryable_http_error(tmp_path: Path):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, content=b"missing", request=request)
+
+    client = MaktabClient(cookie="sessionid=test", retries=3)
+    await client.http.aclose()
+    client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            await client.download("https://cdn.example/missing.mp4", tmp_path / "missing.mp4", "https://maktabkhooneh.org/")
+    finally:
+        await client.close()
