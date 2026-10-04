@@ -357,7 +357,7 @@ class MaktabClient:
                 if not isinstance(units, list):
                     continue
                 chapter_name = str(chapter.get("title") or chapter.get("slug") or "chapter")
-                season_label = f"Season {chapter_index:02d} / {chapter_name}"
+                chapter_label = f"Chapter {chapter_index:02d} / {chapter_name}"
                 chapter_dir = root / download_name(f"chapter-{chapter_index:02d}", chapter_name, quality)
                 jobs = []
                 for unit_index, unit in enumerate(units, 1):
@@ -377,12 +377,12 @@ class MaktabClient:
                             sample_bytes,
                             lms,
                             progress=progress,
-                            season_label=season_label,
+                            chapter_label=chapter_label,
                         )
                     )
                 if not jobs:
                     continue
-                console.print(f"[bold cyan]{season_label}[/bold cyan]")
+                console.print(f"[bold cyan]{chapter_label}[/bold cyan]")
                 results = await asyncio.gather(*jobs, return_exceptions=True)
                 failures.extend(result for result in results if isinstance(result, BaseException))
         if failures:
@@ -401,11 +401,11 @@ class MaktabClient:
         lms: bool,
         *,
         progress: Progress | None = None,
-        season_label: str | None = None,
+        chapter_label: str | None = None,
     ) -> None:
         title = str(unit.get("title") or unit.get("slug") or "lecture")
         base = f"video-{index:02d}"
-        display_label = f"{season_label} / {base}" if season_label else base
+        display_label = f"{chapter_label} / {base}" if chapter_label else base
         lecture_url = f"{ORIGIN}/lms/course/{course.slug}/unit/{unit.get('id') or unit.get('unit_id')}/" if lms else f"{ORIGIN}/course/{course.slug}/{chapter.get('slug')}-ch{chapter.get('id')}/{unit.get('slug')}/"
         caption = None
         attachments: list[str] = []
@@ -436,11 +436,11 @@ class MaktabClient:
             caption_url = caption
             if "file=" in caption_url and caption_url.endswith("file="):
                 caption_url += subtitle_name
-            caption_label = f"{season_label} / {subtitle_name}" if season_label else subtitle_name
+            caption_label = f"{chapter_label} / {subtitle_name}" if chapter_label else subtitle_name
             await self.download(caption_url, directory / subtitle_name, lecture_url, label=caption_label, progress=progress)
         for attachment in attachments:
             filename = Path(urlparse(attachment).path).name or "attachment.bin"
-            attachment_label = f"{season_label} / {filename}" if season_label else filename
+            attachment_label = f"{chapter_label} / {filename}" if chapter_label else filename
             await self.download(attachment, directory / f"{file_base}--{safe_name(filename, underscores=True)}", lecture_url, label=attachment_label, progress=progress)
 
 

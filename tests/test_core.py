@@ -177,10 +177,10 @@ async def test_download_course_keeps_one_progress_display_until_all_jobs_finish(
         async def outline(self, course):
             return {"chapters": [{"title": "Introduction", "units": [{"id": 1, "type": 1}, {"id": 2, "type": 1}]}]}
 
-        async def _download_unit(self, course, chapter, unit, directory, index, quality, sample_bytes, lms, *, progress=None, season_label=None):
+        async def _download_unit(self, course, chapter, unit, directory, index, quality, sample_bytes, lms, *, progress=None, chapter_label=None):
             self.events.append(f"start-{unit['id']}")
             assert progress is RecordingProgress.instances[0]
-            assert season_label == "Season 01 / Introduction"
+            assert chapter_label == "Chapter 01 / Introduction"
             if unit["id"] == 1:
                 self.events.append("failed")
                 raise RuntimeError("one lecture failed")
