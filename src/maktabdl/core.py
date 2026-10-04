@@ -16,6 +16,7 @@ from .session import cookie_header, load_session, save_session, session_cookie
 
 ORIGIN = "https://maktabkhooneh.org"
 UA = "maktabdl/0.1 (+https://maktabkhooneh.org/)"
+RETRY_DELAY_SECONDS = 10
 console = Console()
 
 
@@ -25,6 +26,10 @@ class CourseRef:
     slug: str
     course_id: int | None
     lms: bool
+
+
+class _NonRetryableDownloadError(RuntimeError):
+    """An HTTP error that should be reported without another attempt."""
 
 
 def parse_course_url(value: str) -> CourseRef:
@@ -153,7 +158,7 @@ class MaktabClient:
                 if response.status_code >= 400:
                     if self._retryable_status(response.status_code) and attempt < attempts:
                         await response.aclose()
-                        await asyncio.sleep(min(attempt, 5))
+                        await asyncio.sleep(RETRY_DELAY_SECONDS)
                         continue
                     detail = response.text[:300].strip().replace("\n", " ")
                     await response.aclose()
@@ -167,7 +172,7 @@ class MaktabClient:
                     raise RuntimeError(
                         f"{method} {url} failed after {self.retries} retries: {error}"
                     ) from error
-                await asyncio.sleep(min(attempt, 5))
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
         raise RuntimeError(f"{method} {url} failed unexpectedly")
 
     async def json(self, url: str, referer: str, **kwargs) -> dict:
@@ -285,10 +290,15 @@ class MaktabClient:
                     async with self.http.stream("GET", url, headers=headers) as response:
                         if response.status_code >= 400:
                             detail = (await response.aread()).decode(errors="replace")[:200].strip().replace("\n", " ")
-                            if self._retryable_status(response.status_code) and attempt < attempts:
-                                await asyncio.sleep(min(attempt, 5))
-                                continue
-                            raise RuntimeError(
+                            if self._retryable_status(response.status_code):
+                                if attempt < attempts:
+                                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                                    continue
+                                raise RuntimeError(
+                                    f"download {url} failed with HTTP {response.status_code}"
+                                    + (f": {detail}" if detail else "")
+                                )
+                            raise _NonRetryableDownloadError(
                                 f"download {url} failed with HTTP {response.status_code}"
                                 + (f": {detail}" if detail else "")
                             )
@@ -319,6 +329,8 @@ class MaktabClient:
                 part.replace(target)
                 return "downloaded"
             except (httpx.HTTPError, OSError, RuntimeError) as error:
+                if isinstance(error, _NonRetryableDownloadError):
+                    raise
                 if task_id is not None:
                     if attempt >= attempts:
                         progress.update(task_id, description=f"[red]FAILED[/red] {label or target.name}")
@@ -328,7 +340,7 @@ class MaktabClient:
                     raise RuntimeError(
                         f"download failed for {target} after {self.retries} retries: {error}"
                     ) from error
-                await asyncio.sleep(attempt)
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
         raise AssertionError("unreachable")
 
     async def download_course(self, course: CourseRef, output: Path, folder_name: str | None, quality: int, sample_bytes: int) -> None:

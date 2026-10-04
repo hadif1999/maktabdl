@@ -103,8 +103,12 @@ async def test_async_download_updates_shared_progress(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_download_retries_transient_http_failure(tmp_path: Path):
+async def test_download_retries_transient_http_failure(tmp_path: Path, monkeypatch):
     calls = 0
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
@@ -114,6 +118,7 @@ async def test_download_retries_transient_http_failure(tmp_path: Path):
         return httpx.Response(200, headers={"content-length": "5"}, content=b"hello", request=request)
 
     client = MaktabClient(cookie="sessionid=test", retries=1)
+    monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
     await client.http.aclose()
     client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     target = tmp_path / "retry.mp4"
@@ -122,15 +127,50 @@ async def test_download_retries_transient_http_failure(tmp_path: Path):
     finally:
         await client.close()
     assert calls == 2
+    assert delays == [10]
     assert target.read_bytes() == b"hello"
 
 
 @pytest.mark.asyncio
-async def test_download_reports_non_retryable_http_error(tmp_path: Path):
+async def test_api_retries_wait_ten_seconds(monkeypatch):
+    calls = 0
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        status = 503 if calls == 1 else 200
+        return httpx.Response(status, content=b"{}", request=request)
+
+    monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
+    client = MaktabClient(retries=1)
+    await client.http.aclose()
+    client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        response = await client._request("GET", "https://api.example/course")
+        await response.aclose()
+    finally:
+        await client.close()
+
+    assert calls == 2
+    assert delays == [10]
+
+
+@pytest.mark.asyncio
+async def test_download_reports_non_retryable_http_error(tmp_path: Path, monkeypatch):
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, content=b"missing", request=request)
 
     client = MaktabClient(cookie="sessionid=test", retries=3)
+    monkeypatch.setattr("maktabdl.core.asyncio.sleep", fake_sleep)
     await client.http.aclose()
     client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
@@ -138,6 +178,7 @@ async def test_download_reports_non_retryable_http_error(tmp_path: Path):
             await client.download("https://cdn.example/missing.mp4", tmp_path / "missing.mp4", "https://maktabkhooneh.org/")
     finally:
         await client.close()
+    assert delays == []
 
 
 @pytest.mark.asyncio

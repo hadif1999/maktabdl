@@ -101,7 +101,7 @@ uv run maktabdl download COURSE_URL [options]
 - `-f`, `--filename`: course folder name override.
 - `--sample-bytes N`: save only the first `N` bytes of each video for a quick check.
 - `--concurrency N`: maximum simultaneous HTTP operations; default `4`.
-- `--retry N`: retries after the first failed request; default `3`.
+- `--retry N`: retries after the first failed request; waits 10 seconds between attempts; default `3`.
 - `--timeout N`: per-request timeout in seconds; default `60`.
 - `-v`, `--verbose`: enable diagnostic output.
 
