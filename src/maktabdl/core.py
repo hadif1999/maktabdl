@@ -357,6 +357,7 @@ class MaktabClient:
                 if not isinstance(units, list):
                     continue
                 chapter_name = str(chapter.get("title") or chapter.get("slug") or "chapter")
+                season_label = f"Season {chapter_index:02d} / {chapter_name}"
                 chapter_dir = root / download_name(f"chapter-{chapter_index:02d}", chapter_name, quality)
                 jobs = []
                 for unit_index, unit in enumerate(units, 1):
@@ -365,18 +366,46 @@ class MaktabClient:
                     is_video = unit.get("type") == 1 if lms else unit.get("type") == "lecture"
                     if not is_video:
                         continue
-                    jobs.append(self._download_unit(course, chapter, unit, chapter_dir, unit_index, quality, sample_bytes, lms, progress=progress))
+                    jobs.append(
+                        self._download_unit(
+                            course,
+                            chapter,
+                            unit,
+                            chapter_dir,
+                            unit_index,
+                            quality,
+                            sample_bytes,
+                            lms,
+                            progress=progress,
+                            season_label=season_label,
+                        )
+                    )
                 if not jobs:
                     continue
+                console.print(f"[bold cyan]{season_label}[/bold cyan]")
                 results = await asyncio.gather(*jobs, return_exceptions=True)
                 failures.extend(result for result in results if isinstance(result, BaseException))
         if failures:
             details = "; ".join(str(error) for error in failures)
             raise RuntimeError(f"{len(failures)} download(s) failed: {details}")
 
-    async def _download_unit(self, course: CourseRef, chapter: dict, unit: dict, directory: Path, index: int, quality: int, sample_bytes: int, lms: bool, *, progress: Progress | None = None) -> None:
+    async def _download_unit(
+        self,
+        course: CourseRef,
+        chapter: dict,
+        unit: dict,
+        directory: Path,
+        index: int,
+        quality: int,
+        sample_bytes: int,
+        lms: bool,
+        *,
+        progress: Progress | None = None,
+        season_label: str | None = None,
+    ) -> None:
         title = str(unit.get("title") or unit.get("slug") or "lecture")
         base = f"video-{index:02d}"
+        display_label = f"{season_label} / {base}" if season_label else base
         lecture_url = f"{ORIGIN}/lms/course/{course.slug}/unit/{unit.get('id') or unit.get('unit_id')}/" if lms else f"{ORIGIN}/course/{course.slug}/{chapter.get('slug')}-ch{chapter.get('id')}/{unit.get('slug')}/"
         caption = None
         attachments: list[str] = []
@@ -384,7 +413,7 @@ class MaktabClient:
             details, video = await self.unit_data(unit.get("id") or unit.get("unit_id"), course.url)
             video_url, selected, warning = choose_video_url(video, quality)
             if warning:
-                console.print(f"[yellow]Quality: {base}: {warning}[/yellow]")
+                console.print(f"[yellow]Quality: {display_label}: {warning}[/yellow]")
             caption = details.get("caption_file") if details and details.get("has_caption") else None
             attachments = [r.get("download_url") for r in (details or {}).get("resources", []) if isinstance(r, dict) and r.get("type") != 1 and r.get("download_url")]
         else:
@@ -394,23 +423,25 @@ class MaktabClient:
             caption = parser.tracks[0] if parser.tracks else None
             attachments = parser.attachments
             if video_url and not re.search(r"(?:480|720|1080)", video_url):
-                console.print(f"[yellow]Quality: {base}: legacy source has no explicit resolution; using available source[/yellow]")
+                console.print(f"[yellow]Quality: {display_label}: legacy source has no explicit resolution; using available source[/yellow]")
         if not video_url:
-            console.print(f"[yellow]Skipping {base}: no downloadable video URL[/yellow]")
+            console.print(f"[yellow]Skipping {display_label}: no downloadable video URL[/yellow]")
             return
         file_base = download_name(base, title, selected or quality)
         final = directory / (file_base + (".sample.mp4" if sample_bytes else ".mp4"))
-        status = await self.download(video_url, final, lecture_url, sample_bytes, base, progress=progress)
-        console.print(f"[green]{status.upper()}: {final}[/green]")
+        status = await self.download(video_url, final, lecture_url, sample_bytes, display_label, progress=progress)
+        console.print(f"[green]{status.upper()}[/green] {display_label}: {final}")
         if caption:
             subtitle_name = file_base + ".vtt"
             caption_url = caption
             if "file=" in caption_url and caption_url.endswith("file="):
                 caption_url += subtitle_name
-            await self.download(caption_url, directory / subtitle_name, lecture_url, label=subtitle_name, progress=progress)
+            caption_label = f"{season_label} / {subtitle_name}" if season_label else subtitle_name
+            await self.download(caption_url, directory / subtitle_name, lecture_url, label=caption_label, progress=progress)
         for attachment in attachments:
             filename = Path(urlparse(attachment).path).name or "attachment.bin"
-            await self.download(attachment, directory / f"{file_base}--{safe_name(filename, underscores=True)}", lecture_url, label=filename, progress=progress)
+            attachment_label = f"{season_label} / {filename}" if season_label else filename
+            await self.download(attachment, directory / f"{file_base}--{safe_name(filename, underscores=True)}", lecture_url, label=attachment_label, progress=progress)
 
 
 async def login_and_save(email: str, password: str, session_file: Path, retries: int = 3, timeout: float = 60.0) -> None:

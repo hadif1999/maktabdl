@@ -133,6 +133,9 @@ so a later run can continue from the saved offset. Folder names use the
 requested quality; individual files use the selected quality when a fallback
 was required.
 
+In the terminal, progress bars are grouped by season/chapter and labeled with the
+season first, for example `Season 01 / Introduction / video-01`.
+
 ## Development
 
 Install development dependencies and run the targeted test suite:
