@@ -1,0 +1,31 @@
+# Local environments and Python caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated/build artifacts
+build/
+dist/
+*.egg-info/
+graphify-out/
+
+# User data and downloads
+download/
+session.json
+*.part
+*.sample.mp4
+*.log
+
+# The original conversion notes and JavaScript reference are local working docs
+docs/
+
+# Local configuration and editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,138 @@
+# maktabdl
+
+`maktabdl` is an asynchronous command-line downloader for Maktabkhooneh
+courses. It uses `httpx` for HTTP requests, bounded concurrency for fast
+downloads, and `uv` for reproducible Python environments.
+
+Only download material that you are legally allowed to access.
+
+## Quick start
+
+Install [uv](https://docs.astral.sh/uv/) if it is not already installed, then
+install the project:
+
+```bash
+uv sync
+```
+
+Log in and save a reusable session. The `-o` value is a directory; the command
+creates `session.json` inside it:
+
+```bash
+uv run maktabdl login \
+  -u you@example.com \
+  -p 'your-password' \
+  -o ~/.config/maktabdl
+```
+
+Download a course using the exact session-file path:
+
+```bash
+uv run maktabdl download \
+  'https://maktabkhooneh.org/lms/course/<slug>/unit/<unit-id>/' \
+  -s ~/.config/maktabdl/session.json \
+  --quality 720
+```
+
+The default output is `./download/<course_name>/`. Customize it with `-o` and
+the course folder name with `-f`:
+
+```bash
+uv run maktabdl download 'https://maktabkhooneh.org/course/<slug>/' \
+  -s ~/.config/maktabdl/session.json \
+  --quality 1080 \
+  -o ./videos \
+  -f my_course
+```
+
+See all options and more examples with:
+
+```bash
+uv run maktabdl --help
+uv run maktabdl login --help
+uv run maktabdl download --help
+```
+
+## Commands
+
+### Login
+
+```text
+maktabdl login -u USERNAME -p PASSWORD [-o SESSION_DIRECTORY]
+```
+
+The session file stores cookies in a multi-user JSON structure and is created
+with private permissions. The default location is `./session.json`.
+
+For better shell-history hygiene, prefer an environment variable or a prompt
+wrapper when entering passwords rather than keeping a password in shell
+history.
+
+### Download
+
+```text
+maktabdl download COURSE_URL [options]
+```
+
+- `-s`, `--session-file`: exact session file path; default `./session.json`.
+- `--quality {480,720,1080}`: preferred video quality; default `720`.
+- `-o`, `--output-dir`: parent output directory; default `./download`.
+- `-f`, `--filename`: course folder name override.
+- `--sample-bytes N`: save only the first `N` bytes of each video for a quick check.
+- `--concurrency N`: maximum simultaneous HTTP operations; default `4`.
+- `-v`, `--verbose`: enable diagnostic output.
+
+The downloader supports both legacy URLs and LMS URLs. It skips existing files,
+resumes interrupted `.part` files with HTTP range requests, retries transient
+failures, and downloads available subtitles and attachments beside each video.
+
+## Quality and route behavior
+
+For LMS courses, quality variants come from:
+
+```text
+/api/v1/lms/units/{unit_id}/video_url/
+```
+
+The requested resolution is selected exactly when available. If it is missing,
+the nearest available resolution is selected and a warning is printed, followed
+by the API's `hq`/`lq` fallback when necessary.
+
+Legacy course pages expose video sources in HTML rather than a documented
+resolution API. When a legacy source URL does not contain a resolution hint,
+`maktabdl` warns and uses the available source.
+
+Authentication currently uses the site's `/signin/` page followed by the
+`/api/v1/auth/check-active-user` and `/api/v1/auth/login-authentication`
+endpoints. Existing cookie overrides are also supported:
+
+```bash
+export MK_COOKIE='csrftoken=...; sessionid=...'
+export MK_COOKIE_FILE="$HOME/.config/maktabdl/cookie.txt"
+```
+
+## Output layout
+
+```text
+download/<course_name>/
+  01 - <chapter>/
+    01 - <lecture>.mp4
+    01 - <lecture>.vtt
+    01 - <lecture> - <attachment>
+```
+
+Sample downloads use `.sample.mp4` filenames. Interrupted full downloads keep a
+`.part` file so a later run can continue from the saved offset.
+
+## Development
+
+Install development dependencies and run the targeted test suite:
+
+```bash
+uv sync --dev
+uv run pytest -q
+uv run python -m compileall -q src tests
+```
+
+The package entry point is `maktabdl.cli:main`, and the source lives under
+`src/maktabdl/`.
