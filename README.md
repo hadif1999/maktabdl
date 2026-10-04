@@ -34,7 +34,7 @@ uv run maktabdl download \
   --quality 720
 ```
 
-The default output is `./download/<course_name>/`. Customize it with `-o` and
+The default output is `./maktabdl_downloads/<course_name>/`. Customize it with `-o` and
 the course folder name with `-f`:
 
 ```bash
@@ -76,7 +76,7 @@ maktabdl download COURSE_URL [options]
 
 - `-s`, `--session-file`: exact session file path; default `./session.json`.
 - `--quality {480,720,1080}`: preferred video quality; default `720`.
-- `-o`, `--output-dir`: parent output directory; default `./download`.
+- `-o`, `--output-dir`: parent output directory; default `./maktabdl_downloads`.
 - `-f`, `--filename`: course folder name override.
 - `--sample-bytes N`: save only the first `N` bytes of each video for a quick check.
 - `--concurrency N`: maximum simultaneous HTTP operations; default `4`.
@@ -116,7 +116,7 @@ export MK_COOKIE_FILE="$HOME/.config/maktabdl/cookie.txt"
 ## Output layout
 
 ```text
-download/<course_name>_720p/
+maktabdl_downloads/<course_name>_720p/
   01 - <chapter>_720p/
     01 - <lecture>_720p.mp4
     01 - <lecture>_720p.vtt

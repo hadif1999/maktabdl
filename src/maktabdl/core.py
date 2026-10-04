@@ -5,7 +5,7 @@ import html
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 from html.parser import HTMLParser
 
 import httpx
@@ -47,6 +47,7 @@ def parse_course_url(value: str) -> CourseRef:
 
 
 def safe_name(value: str, underscores: bool = False) -> str:
+    value = unquote(value)
     value = re.sub(r"[/:*?\"<>|\\]", " ", value)
     value = re.sub(r"[\s\u200c\u200f\u202a-\u202e]+", "_" if underscores else " ", value)
     return value.strip(" ._")[:150] or "course"

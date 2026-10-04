@@ -31,7 +31,7 @@ def parser() -> argparse.ArgumentParser:
     download.add_argument("course_url", help="legacy or LMS course URL")
     download.add_argument("--quality", type=int, choices=(480, 720, 1080), default=720, help="preferred video quality (default: 720)")
     download.add_argument("-s", "--session-file", type=Path, default=Path.cwd() / "session.json", help="exact session file (default: ./session.json)")
-    download.add_argument("-o", "--output-dir", type=Path, default=Path.cwd() / "download", help="parent output directory (default: ./download)")
+    download.add_argument("-o", "--output-dir", type=Path, default=Path.cwd() / "maktabdl_downloads", help="parent output directory (default: ./maktabdl_downloads)")
     download.add_argument("-f", "--filename", help="course folder name override")
     download.add_argument("--sample-bytes", type=int, default=0, help="download only the first N bytes of each video")
     download.add_argument("--concurrency", type=int, default=4, help="maximum concurrent HTTP operations (default: 4)")
